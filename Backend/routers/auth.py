@@ -16,9 +16,6 @@ ADMIN_PASS = os.environ.get("ADMIN_PASSWORD", "123")
 def get_supabase(request: Request) -> Client:
     return request.state.supabase
 
-# --- PERFORMANCE FIX: Changed 'async def' to 'def' ---
-# FastAPI runs synchronous routes in a thread pool, preventing blocking 
-# by the synchronous Supabase client and Pandas operations.
 @router.post("/token")
 def login_for_access_token(
     form_data: OAuth2PasswordRequestForm = Depends(),

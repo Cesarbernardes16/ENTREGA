@@ -34,9 +34,7 @@ async def ler_relatorio_xadrez(
     current_user: dict = Depends(get_current_user), # <--- Proteção
     supabase: Client = Depends(get_supabase)
 ):
-    # Apenas Admin vê o Xadrez completo? Vamos assumir que sim por agora
-    # ou que todos veem.
-    
+
     hoje = datetime.date.today()
     data_inicio = data_inicio or hoje.replace(day=1).isoformat()
     data_fim = data_fim or hoje.isoformat()
