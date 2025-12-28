@@ -39,15 +39,19 @@ async def _get_dados_completos(data_inicio: str, data_fim: str, supabase: Client
     df_indicadores, err3 = await run_in_threadpool(get_indicadores_sincrono, supabase, d_ini_str, d_fim_str)
     df_caixas, err4 = await run_in_threadpool(get_caixas_sincrono, supabase, data_inicio, data_fim)
     
+    # --- DEDUPLICAÇÃO DE MAPAS ---
+    # Cria uma versão sem duplicatas de MAPA para garantir cálculos corretos de pagamento
     df_viagens_dedup = None
     if df_viagens is not None:
-        if 'MAPA' in df_viagens.columns: df_viagens_dedup = df_viagens.drop_duplicates(subset=['MAPA'])
-        else: df_viagens_dedup = df_viagens.drop_duplicates()
+        if 'MAPA' in df_viagens.columns: 
+            df_viagens_dedup = df_viagens.drop_duplicates(subset=['MAPA'])
+        else: 
+            df_viagens_dedup = df_viagens.drop_duplicates()
 
     return {
         "metas": metas,
         "df_viagens_bruto": df_viagens,
-        "df_viagens_dedup": df_viagens_dedup,
+        "df_viagens_dedup": df_viagens_dedup, # Usaremos este para KPIs e Caixas
         "df_cadastro": df_cadastro,
         "df_indicadores": df_indicadores,
         "df_caixas": df_caixas,
@@ -55,8 +59,9 @@ async def _get_dados_completos(data_inicio: str, data_fim: str, supabase: Client
     }
 
 def _merge_resultados(m_kpi, a_kpi, m_cx, a_cx):
+    # --- CORREÇÃO: Incluir nome e cpf também nas colunas de Caixas ---
     cols_kpi = ['cod', 'nome', 'cpf', 'total_premio']
-    cols_cx = ['cod', 'total_premio']
+    cols_cx = ['cod', 'nome', 'cpf', 'total_premio']
 
     if m_kpi:
         df_m_kpi = pd.DataFrame(m_kpi).reindex(columns=cols_kpi).rename(columns={"total_premio": "premio_kpi"})
@@ -78,14 +83,17 @@ def _merge_resultados(m_kpi, a_kpi, m_cx, a_cx):
     else:
         df_a_cx = pd.DataFrame(columns=cols_cx)
 
-    df_m_kpi['premio_kpi'] = df_m_kpi['premio_kpi'].fillna(0)
-    df_m_cx['premio_caixas'] = df_m_cx['premio_caixas'].fillna(0)
+    # Garantir tipos numéricos e preencher NAs antes do merge
+    if 'premio_kpi' in df_m_kpi.columns: df_m_kpi['premio_kpi'] = df_m_kpi['premio_kpi'].fillna(0)
+    if 'premio_caixas' in df_m_cx.columns: df_m_cx['premio_caixas'] = df_m_cx['premio_caixas'].fillna(0)
 
     if not df_m_kpi.empty: df_m_kpi['cod'] = pd.to_numeric(df_m_kpi['cod'], errors='coerce').fillna(0).astype(int)
     if not df_m_cx.empty: df_m_cx['cod'] = pd.to_numeric(df_m_cx['cod'], errors='coerce').fillna(0).astype(int)
     if not df_a_kpi.empty: df_a_kpi['cod'] = pd.to_numeric(df_a_kpi['cod'], errors='coerce').fillna(0).astype(int)
     if not df_a_cx.empty: df_a_cx['cod'] = pd.to_numeric(df_a_cx['cod'], errors='coerce').fillna(0).astype(int)
 
+    # Merge Outer para pegar quem tem só KPI ou só Caixas
+    # Suffixes garantem que nome_kpi e nome_cx não colidam
     df_m = pd.merge(df_m_kpi, df_m_cx, on='cod', how='outer', suffixes=('_kpi', '_cx'))
     df_a = pd.merge(df_a_kpi, df_a_cx, on='cod', how='outer', suffixes=('_kpi', '_cx'))
     
@@ -97,11 +105,12 @@ def _merge_resultados(m_kpi, a_kpi, m_cx, a_cx):
         df['premio_caixas'] = df['premio_caixas'].fillna(0)
         df['total_a_pagar'] = df['premio_kpi'] + df['premio_caixas']
         
-        # Consolida colunas de informação que vieram duplicadas no merge
+        # Consolida colunas de informação (Nome e CPF)
+        # Prioriza KPI, mas se não tiver (ex: só ganhou caixa), pega de Caixas
         df['nome'] = df.apply(lambda row: row.get('nome_kpi') if pd.notna(row.get('nome_kpi')) else row.get('nome_cx', ''), axis=1)
         df['cpf'] = df.apply(lambda row: row.get('cpf_kpi') if pd.notna(row.get('cpf_kpi')) else row.get('cpf_cx', ''), axis=1)
         
-        # Remove colunas intermediárias (nome_kpi, nome_cx, cpf_kpi, cpf_cx)
+        # Remove colunas intermediárias para limpar o JSON final
         cols_to_drop = [col for col in df.columns if '_kpi' in col or '_cx' in col]
         df.drop(columns=cols_to_drop, errors='ignore', inplace=True)
 
@@ -123,20 +132,25 @@ async def ler_relatorio_pagamento(
         if dados["error_message"]:
              return {"motoristas": [], "ajudantes": [], "error": dados["error_message"]}
 
+        # Processa KPIs (já usava dedup)
         m_kpi, a_kpi = await run_in_threadpool(
             processar_incentivos_sincrono,
             dados["df_viagens_dedup"], dados["df_cadastro"], 
             dados["df_indicadores"], None, dados["metas"]
         )
         
+        # --- CORREÇÃO IMPORTANTE AQUI ---
+        # Agora usamos 'df_viagens_dedup' em vez de 'df_viagens_bruto' também para Caixas.
+        # Isso evita que o mesmo mapa seja somado 2x se houver duplicidade no banco.
         m_cx, a_cx = await run_in_threadpool(
             processar_caixas_sincrono,
-            dados["df_viagens_bruto"], dados["df_cadastro"], 
+            dados["df_viagens_dedup"], dados["df_cadastro"], 
             dados["df_caixas"], dados["metas"]
         )
         
         df_m, df_a = await run_in_threadpool(_merge_resultados, m_kpi, a_kpi, m_cx, a_cx)
         
+        # Filtro de Segurança
         if current_user["role"] != "admin":
             cpf_user = current_user["username"].replace(".", "").replace("-", "")
             if not df_m.empty:
@@ -162,6 +176,39 @@ async def exportar_relatorio_pagamento(
     token: str, 
     supabase: Client = Depends(get_supabase)
 ):
-    # Restante da rota de exportação (omitido por brevidade, mas você deve usar a versão completa e corrigida)
-    # Certifique-se de que a lógica de merge também está com a correção `suffixes=('_kpi', '_cx')`
-    pass # Coloque a versão completa aqui
+    # Nota: A rota de exportação deve implementar a mesma lógica de deduplicação acima
+    # para garantir que o Excel bata com a tela.
+    # O código abaixo é um esqueleto, certifique-se de copiar a lógica do 'ler_relatorio_pagamento'.
+    try:
+        dados = await _get_dados_completos(data_inicio, data_fim, supabase)
+        
+        m_kpi, a_kpi = await run_in_threadpool(
+            processar_incentivos_sincrono,
+            dados["df_viagens_dedup"], dados["df_cadastro"], 
+            dados["df_indicadores"], None, dados["metas"]
+        )
+        
+        # CORREÇÃO AQUI TAMBÉM
+        m_cx, a_cx = await run_in_threadpool(
+            processar_caixas_sincrono,
+            dados["df_viagens_dedup"], dados["df_cadastro"], 
+            dados["df_caixas"], dados["metas"]
+        )
+        
+        df_m, df_a = await run_in_threadpool(_merge_resultados, m_kpi, a_kpi, m_cx, a_cx)
+        
+        # Gerar Excel (simplificado para o exemplo, use sua lógica de exportação existente)
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df_m.to_excel(writer, sheet_name='Motoristas', index=False)
+            df_a.to_excel(writer, sheet_name='Ajudantes', index=False)
+        output.seek(0)
+        
+        headers = {
+            'Content-Disposition': f'attachment; filename="Pagamento_{data_inicio}_{data_fim}.xlsx"'
+        }
+        return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+    except Exception as e:
+        print(f"Erro na exportação: {e}")
+        raise HTTPException(status_code=500, detail="Erro ao gerar Excel")

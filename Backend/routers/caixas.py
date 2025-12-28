@@ -112,8 +112,13 @@ def processar_caixas_sincrono(df_viagens: pd.DataFrame, df_cadastro: pd.DataFram
         dias = motorista_antiguidade_map.get(cod, 0)
         valor = _get_valor_por_caixa(dias, metas_motorista)
         resultado_motoristas.append({
-            "cpf": info["cpf"], "cod": cod, "nome": info["nome"],
-            "total_caixas": total, "valor_por_caixa": valor, "total_premio": total * valor,
+            "tipo": "Motorista",
+            "cpf": info["cpf"], 
+            "cod": cod, 
+            "nome": info["nome"],
+            "total_caixas": total, 
+            "valor_por_caixa": valor, 
+            "total_premio": total * valor,
             "antiguidade_dias": dias
         })
 
@@ -124,8 +129,13 @@ def processar_caixas_sincrono(df_viagens: pd.DataFrame, df_cadastro: pd.DataFram
         dias = ajudante_antiguidade_map.get(cod, 0)
         valor = _get_valor_por_caixa(dias, metas_ajudante)
         resultado_ajudantes.append({
-            "cpf": info["cpf"], "cod": cod, "nome": info["nome"],
-            "total_caixas": total, "valor_por_caixa": valor, "total_premio": total * valor,
+            "tipo": "Ajudante",
+            "cpf": info["cpf"], 
+            "cod": cod, 
+            "nome": info["nome"],
+            "total_caixas": total, 
+            "valor_por_caixa": valor, 
+            "total_premio": total * valor,
             "antiguidade_dias": dias
         })
 
@@ -149,6 +159,12 @@ async def ler_relatorio_caixas(
     
     motoristas, ajudantes = [], []
     if not error:
+        # --- CORREÇÃO DE DUPLICAÇÃO ---
+        # Removemos linhas onde o MAPA é duplicado antes de processar
+        # para garantir que cada mapa seja pago apenas uma vez.
+        if df_viagens is not None and not df_viagens.empty and 'MAPA' in df_viagens.columns:
+            df_viagens = df_viagens.drop_duplicates(subset=['MAPA'])
+
         motoristas, ajudantes = await run_in_threadpool(
             processar_caixas_sincrono, df_viagens, df_cadastro, df_caixas, metas
         )
